@@ -17,6 +17,8 @@ class SyncEngine:
         self.sucursal_unica = self.settings.getint('SucursalUnica', 0)
         self.version = self.settings.get('Version', '1.0.0')
         self.es_biostar = self.settings.getint('EsBioStar', 0)
+        self.ruta_servidor = self.settings.get('RutaServidor', '')
+
 
 
     def execute_sync(self):
@@ -112,6 +114,13 @@ class SyncEngine:
 
             # 14. Respaldando Interface ZK (Simulado de RespaldarInterfaceZK)
             self.push_interface_zk(local_cur, remote_cur)
+
+            # 14b. Respaldando Asistencias
+            self.push_asistencias(local_cur, remote_cur)
+
+            # 14c. Respaldando Fotos
+            self.push_fotos(local_cur, remote_cur)
+
 
             # ----------------------------------------------------
             # MULTISUCURSAL (SOCIOS DE OTRAS SUCURSALES)
@@ -1238,4 +1247,95 @@ class SyncEngine:
 
         except Exception as e:
             logging.error(f"Error en push_visitas: {e}")
+
+    def push_asistencias(self, local_cur, remote_cur):
+        logging.info("Respaldando Asistencias...")
+        try:
+            self._execute_local(local_cur, "SELECT * FROM tblAsistencias WHERE Modificado >= 1")
+            rows = local_cur.fetchall()
+            for row in tqdm(rows, desc="Push Asistencias", disable=sys.stdout is None):
+                id_asistencia = self._get_val(row, 'IdAsistencia')
+                id_usuario = self._get_val(row, 'IdUsuario')
+                fecha_asistencia = format_sql_date(self._get_val(row, 'FechaAsistencia'))
+                rechazo_huella = self._get_val(row, 'RechazoHuella')
+                es_salida = self._get_val(row, 'EsSalida')
+                id_lector = self._get_val(row, 'IdLector')
+
+                fields = "IdAsistencia, IdUsuario, FechaAsistencia, RechazoHuella, FechaAct, IdSucursal, EsSalida, IdLector"
+                vals = (
+                    f"{id_asistencia}, "
+                    f"{id_usuario}, "
+                    f"'{fecha_asistencia}', "
+                    f"{rechazo_huella}, "
+                    f"NOW(), "
+                    f"{self.id_sucursal}, "
+                    f"{valida_nulo(es_salida)}, "
+                    f"{valida_nulo(id_lector)}"
+                )
+                self._execute_remote(remote_cur, f"REPLACE INTO tblAsistencias({fields}) VALUES ({vals})")
+                self._execute_local(local_cur, f"UPDATE tblAsistencias SET Modificado = 0 WHERE IdAsistencia = {id_asistencia}")
+            self.db.local_conn.commit()
+        except Exception as e:
+            logging.error(f"Error en push_asistencias: {e}")
+
+    def push_fotos(self, local_cur, remote_cur):
+        import os
+        logging.info("Respaldando Fotos...")
+        try:
+            sql = (
+                "SELECT A.*, Serie FROM tblSocios A "
+                "INNER JOIN tblSucursales B ON A.IdSucursal = B.IdSucursal "
+                "WHERE ModificadoFoto = 1 ORDER BY IdSocio"
+            )
+            self._execute_local(local_cur, sql)
+            rows = local_cur.fetchall()
+            for row in tqdm(rows, desc="Push Fotos", disable=sys.stdout is None):
+                id_socio = self._get_val(row, 'IdSocio')
+                id_suc = self._get_val(row, 'IdSucursal')
+                es_jpg = self._get_val(row, 'EsJpg')
+                serie = self._get_val(row, 'Serie')
+
+                # Update remote older photos status
+                self._execute_remote(remote_cur, f"UPDATE tblSociosFotos SET EsUltimaFoto = 0 WHERE IdSocio = {id_socio} AND IdSucursal = {id_suc}")
+
+                # Insert remote placeholder
+                sql_ins_placeholder = (
+                    "INSERT INTO tblSociosFotos(IdSocio, IdSucursal, IdSucursalActualiza, FechaAct, EsUltimaFoto, EsJpg) "
+                    f"VALUES({id_socio}, {id_suc}, {self.id_sucursal}, NOW(), 1, {es_jpg})"
+                )
+                self._execute_remote(remote_cur, sql_ins_placeholder)
+
+                # Remote recipients sync
+                sql_rep_rec = (
+                    "REPLACE INTO tblSociosSucursalesRecepcion(IdSocio, IdSucursal, IdSucursalRecepcion, IdSucursalActualiza, Recepcion, FechaAct, TipoRecepcion) "
+                    f"SELECT {id_socio}, {id_suc}, IdSucursal, {self.id_sucursal}, 0, NOW(), 1 FROM tblSucursales WHERE Status = 0 AND IdSucursal <> {self.id_sucursal}"
+                )
+                self._execute_remote(remote_cur, sql_rep_rec)
+
+                # Local photo path
+                ext = ".jpg" if es_jpg == 1 else ".bmp"
+                file_name = f"{serie}{id_socio}{ext}"
+                local_path = os.path.join(self.ruta_servidor, "Fotos", file_name)
+
+                # Check and read file binary
+                if os.path.exists(local_path):
+                    with open(local_path, "rb") as f:
+                        foto_binary = f.read()
+
+                    # Update binary photo remote
+                    sql_upd_foto = (
+                        "UPDATE tblSociosFotos SET Foto = %s "
+                        f"WHERE IdSocio = {id_socio} AND IdSucursal = {id_suc} AND EsUltimaFoto = 1"
+                    )
+                    self._execute_remote(remote_cur, sql_upd_foto, (foto_binary,))
+                else:
+                    logging.warning(f"Foto no encontrada localmente: {local_path}")
+
+                # Clear local ModificadoFoto flag
+                self._execute_local(local_cur, f"UPDATE tblSocios SET ModificadoFoto = 0 WHERE IdSocio = {id_socio} AND IdSucursal = {id_suc}")
+            
+            self.db.local_conn.commit()
+        except Exception as e:
+            logging.error(f"Error en push_fotos: {e}")
+
 
