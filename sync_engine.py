@@ -880,6 +880,74 @@ class SyncEngine:
             self._execute_local(local_cur, f"INSERT INTO tblFamiliares({fields}) VALUES ({vals})")
         self.db.local_conn.commit()
 
+        # Recibiendo fotos de otras sucursales
+        logging.info("Recibiendo fotos de otras sucursales...")
+        try:
+            vl_fecha_act_fotos = self.settings.get('FechaActFotos', '2000-01-01')
+            sql_fotos = (
+                f"SELECT A.*, Serie FROM tblSociosFotos A "
+                f"INNER JOIN tblSucursales C ON A.IdSucursal = C.IdSucursal "
+                f"WHERE A.IdSucursalActualiza <> {self.id_sucursal} AND Foto IS NOT NULL "
+                f"AND A.FechaAct >= '{vl_fecha_act_fotos}' AND A.EsUltimaFoto = 1 "
+                f"ORDER BY A.FechaAct"
+            )
+            self._execute_remote(remote_cur, sql_fotos)
+            rows_fotos = remote_cur.fetchall()
+            
+            import os
+            for row in tqdm(rows_fotos, desc="Fotos O.S.", disable=sys.stdout is None):
+                id_socio = self._get_val(row, 'IdSocio')
+                id_suc = self._get_val(row, 'IdSucursal')
+                es_jpg = self._get_val(row, 'EsJpg')
+                serie = self._get_val(row, 'Serie')
+                foto_data = self._get_val(row, 'Foto') # Binary blob
+                
+                vl_id_zk = (id_socio * 10000) + id_suc
+                
+                if foto_data:
+                    ext = ".jpg" if es_jpg == 1 else ".bmp"
+                    file_name_primary = f"{serie}{id_socio}{ext}"
+                    file_name_secondary = f"{vl_id_zk}.jpg"
+                    
+                    path_primary = os.path.join(self.ruta_servidor, "Fotos", file_name_primary)
+                    path_secondary = os.path.join(self.ruta_servidor, "Fotos", file_name_secondary)
+                    
+                    try:
+                        os.makedirs(os.path.dirname(path_primary), exist_ok=True)
+                        with open(path_primary, "wb") as f:
+                            f.write(foto_data)
+                        with open(path_secondary, "wb") as f:
+                            f.write(foto_data)
+                    except Exception as e:
+                        logging.error(f"No se pudieron escribir los archivos de fotos locales: {e}")
+                    
+                    # Local update
+                    self._execute_local(local_cur, f"DELETE FROM tblSociosComputadorasRecepcion WHERE IdSocio = {id_socio} AND IdSucursal = {id_suc}")
+                    sql_comp = (
+                        f"INSERT INTO tblSociosComputadorasRecepcion(IdSocio, IdSucursal, IdComputadora, FechaAct, Recepcion) "
+                        f"SELECT {id_socio}, {id_suc}, IdComputadora, NOW(), 0 FROM tblComputadoras WHERE EsHuella = 1"
+                    )
+                    self._execute_local(local_cur, sql_comp)
+                    
+                # Update remote receipt status
+                sql_upd = (
+                    f"UPDATE tblSociosSucursalesRecepcion SET Recepcion = 1 "
+                    f"WHERE IdSocio = {id_socio} AND IdSucursal = {id_suc} AND IdSucursalRecepcion = {self.id_sucursal} AND TipoRecepcion = 1"
+                )
+                self._execute_remote(remote_cur, sql_upd)
+                
+            self.db.local_conn.commit()
+            
+            # Save local configurations
+            vl_fecha_hoy = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            self.settings['FechaActFotos'] = vl_fecha_hoy
+            with open('config.ini', 'w') as configfile:
+                self.config.write(configfile)
+                
+        except Exception as e:
+            logging.error(f"Error recibiendo fotos de otras sucursales: {e}")
+
+
 
     # --- ENVIOS FINALES / RESPALDOS ADICIONALES (LOCAL -> REMOTE) ---
 
