@@ -546,8 +546,9 @@ class SyncEngine:
             
         self.db.local_conn.commit()
 
-    def actualizar_interface_zk(self, id_usuario, p1, p2, p3):
-        logging.debug(f"Simulando ActualizarIntefaceZK para IdUsuario: {id_usuario}")
+    def actualizar_interface_zk(self, *args, **kwargs):
+        logging.debug(f"Simulando ActualizarIntefaceZK con argumentos: {args} {kwargs}")
+
 
     def sync_proveedores(self, local_cur, remote_cur, fecha_act):
         logging.info("Recibiendo Proveedores...")
@@ -1042,6 +1043,41 @@ class SyncEngine:
             
         except Exception as e:
             logging.error(f"Error recibiendo huellas de otras sucursales: {e}")
+
+        # Activando socios multigimnasio
+        logging.info("Activando socios multigimnasio...")
+        try:
+            sql_multi = (
+                "SELECT A.IdSocio, A.IdSucursalSocio, MAX(B.FechaFin) AS FechaVencimiento FROM tblMovimientos A "
+                "INNER JOIN tblDetalleMovimientos B ON A.IdMovimiento = B.IdMovimiento AND A.IdSucursal = B.IdSucursal "
+                "INNER JOIN tblCuotas C ON B.IdCuota = C.IdCuota "
+                f"WHERE B.FechaFin > NOW() AND C.Multigimnasio = 1 AND A.FechaAct >= '{fecha_act[:10]}' "
+                f"AND A.Status = 0 AND A.IdSucursal <> {self.id_sucursal} "
+                "GROUP BY A.IdSocio, A.IdSucursalSocio "
+                "ORDER BY MAX(B.FechaFin)"
+            )
+            self._execute_remote(remote_cur, sql_multi)
+            rows_multi = remote_cur.fetchall()
+            
+            for row in tqdm(rows_multi, desc="Socios Multigym", disable=sys.stdout is None):
+                id_socio = self._get_val(row, 'IdSocio')
+                id_suc_socio = self._get_val(row, 'IdSucursalSocio')
+                fecha_venc = format_sql_date(self._get_val(row, 'FechaVencimiento'))
+                
+                vl_id_zk = (id_socio * 10000) + id_suc_socio
+                
+                # Local updates
+                self._execute_local(local_cur, f"UPDATE tblSociosHuellas SET Status = 0, FechaVencimiento = '{fecha_venc}' WHERE IdSucursal = {id_suc_socio} AND IdSocio = {id_socio}")
+                self._execute_local(local_cur, f"UPDATE tblSocios SET Status = 0, FechaVencimiento = '{fecha_venc}' WHERE IdSucursal = {id_suc_socio} AND IdSocio = {id_socio}")
+                
+                # Biometric ZK update
+                self.actualizar_interface_zk(vl_id_zk, id_suc_socio, 0, False, False, 0)
+                
+            self.db.local_conn.commit()
+            
+        except Exception as e:
+            logging.error(f"Error activando socios multigimnasio: {e}")
+
 
 
 
