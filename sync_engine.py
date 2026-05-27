@@ -16,6 +16,8 @@ class SyncEngine:
         self.gimnasio = self.settings.get('Gimnasio', 'Integra Gym')
         self.sucursal_unica = self.settings.getint('SucursalUnica', 0)
         self.version = self.settings.get('Version', '1.0.0')
+        self.es_biostar = self.settings.getint('EsBioStar', 0)
+
 
     def execute_sync(self):
         logging.info(f"Iniciando ciclo de sincronización para {self.gimnasio} (Sucursal: {self.id_sucursal})...")
@@ -131,7 +133,7 @@ class SyncEngine:
             self.push_recorridos(local_cur, remote_cur)
 
             # 18. Respaldando Aperturas (Simulado de RespaldarAperturas)
-            self.push_aperturas(local_cur, remote_cur)
+            #self.push_aperturas(local_cur, remote_cur)
 
             # 19. Respaldando Inventarios
             self.push_inventarios(local_cur, remote_cur)
@@ -150,6 +152,10 @@ class SyncEngine:
 
             # 24. Respaldando Visitas Sesiones
             self.push_visitas_sesiones(local_cur, remote_cur)
+
+            # 25. Respaldando Visitas
+            self.push_visitas(local_cur, remote_cur)
+
 
             # 25. Registrar transmisión remota final
             #logging.info("Registrando transmisión final...")
@@ -1166,3 +1172,70 @@ class SyncEngine:
             self.db.local_conn.commit()
         except Exception as e:
             logging.debug(f"Visitas sesiones falló o no existe: {e}")
+
+    def push_visitas(self, local_cur, remote_cur):
+        logging.info("Respaldando Visitas...")
+        try:
+            self._execute_local(local_cur, "SELECT * FROM tblVisitas WHERE Modificado >= 1 ORDER BY IdVisita")
+            rows = local_cur.fetchall()
+            if not rows:
+                return
+
+            vl_id_visita_inicio = self._get_val(rows[0], 'IdVisita')
+            vl_id_visita_fin = None
+
+            for row in tqdm(rows, desc="Push Visitas", disable=sys.stdout is None):
+                id_visita = self._get_val(row, 'IdVisita')
+                id_socio = self._get_val(row, 'IdSocio')
+                id_suc_socio = self._get_val(row, 'IdSucursalSocio')
+                fecha_visita = format_sql_date(self._get_val(row, 'FechaVisita'))
+                es_salida = self._get_val(row, 'EsSalida')
+                id_lector = self._get_val(row, 'IdLector')
+                
+                if not self.es_biostar:
+                    fields = "IdVisita, IdSocio, IdSucursalSocio, FechaVisita, IdSucursal, EsSalida, IdLector"
+                    vals = (
+                        f"{id_visita}, "
+                        f"{valida_nulo(id_socio)}, "
+                        f"{valida_nulo(id_suc_socio)}, "
+                        f"'{fecha_visita}', "
+                        f"{self.id_sucursal}, "
+                        f"{valida_nulo(es_salida)}, "
+                        f"{valida_nulo(id_lector)}"
+                    )
+                    sql = f"REPLACE INTO tblVisitas({fields}) VALUES ({vals})"
+                    self._execute_remote(remote_cur, sql)
+                else:
+                    id_visita_biostar = self._get_val(row, 'IdVisitaBioStar')
+                    socio = self._get_val(row, 'Socio')
+                    
+                    # Delete first from remote
+                    sql_del = f"DELETE FROM tblVisitas WHERE IdVisitaBioStar = {valida_nulo(id_visita_biostar)}"
+                    self._execute_remote(remote_cur, sql_del)
+                    
+                    fields = "IdVisita, IdSocio, IdSucursalSocio, FechaVisita, IdSucursal, EsSalida, IdLector, Socio, IdVisitaBioStar"
+                    vals = (
+                        f"{id_visita}, "
+                        f"{valida_nulo(id_socio)}, "
+                        f"{valida_nulo(id_suc_socio)}, "
+                        f"'{fecha_visita}', "
+                        f"{self.id_sucursal}, "
+                        f"{valida_nulo(es_salida)}, "
+                        f"{valida_nulo(id_lector)}, "
+                        f"'{valida_nulo(socio, True)}', "
+                        f"{valida_nulo(id_visita_biostar)}"
+                    )
+                    sql = f"REPLACE INTO tblVisitas({fields}) VALUES ({vals})"
+                    self._execute_remote(remote_cur, sql)
+                
+                vl_id_visita_fin = id_visita
+
+            # Update modificado locally
+            if vl_id_visita_fin is not None:
+                sql_upd = f"UPDATE tblVisitas SET Modificado = 0 WHERE IdVisita >= {vl_id_visita_inicio} AND IdVisita <= {vl_id_visita_fin}"
+                self._execute_local(local_cur, sql_upd)
+                self.db.local_conn.commit()
+
+        except Exception as e:
+            logging.error(f"Error en push_visitas: {e}")
+
