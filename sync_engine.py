@@ -152,12 +152,12 @@ class SyncEngine:
             self.push_visitas_sesiones(local_cur, remote_cur)
 
             # 25. Registrar transmisión remota final
-            logging.info("Registrando transmisión final...")
-            sql_trans = (
-                f"REPLACE INTO tblSucursalesTransmisiones(IdSucursal, IdComputadora, Computadora, Version, FechaTransmision) "
-                f"VALUES({self.id_sucursal}, {self.id_computadora}, '{self.computadora}', '{self.version}', NOW())"
-            )
-            self._execute_remote(remote_cur, sql_trans)
+            #logging.info("Registrando transmisión final...")
+            #sql_trans = (
+            #    f"REPLACE INTO tblSucursalesTransmisiones(IdSucursal, IdComputadora, Computadora, Version, FechaTransmision) "
+            #    f"VALUES({self.id_sucursal}, {self.id_computadora}, '{self.computadora}', '{self.version}', NOW())"
+            #)
+            #self._execute_remote(remote_cur, sql_trans)
 
             # 26. Guardar fechas de actualización locales
             self.settings['FechaAct'] = vl_fecha_hoy
@@ -691,7 +691,7 @@ class SyncEngine:
         logging.info("Procesando lógicas de Multi-Sucursal...")
         
         # Eliminar buffer temporal local
-        self._execute_local(local_cur, f"DELETE FROM tblBufferMaxFechaFin WHERE IdComputadora = {self.id_computadora} AND IdSucursalConsulta = {self.id_sucursal}")
+        #self._execute_local(local_cur, f"DELETE FROM tblBufferMaxFechaFin WHERE IdComputadora = {self.id_computadora} AND IdSucursalConsulta = {self.id_sucursal}")
         
         # Insertar máximas fechas de vencimiento activas en el buffer local
         # En Access SQL, insertamos el agrupado directamente
@@ -704,10 +704,10 @@ class SyncEngine:
             f"WHERE A.Status = 0 AND B.FechaFin > NOW() AND C.TipoCuota = 1 "
             f"GROUP BY A.IdSocio, A.IdSucursalSocio"
         )
-        try:
-            self._execute_local(local_cur, sql_buff)
-        except Exception as e:
-            logging.warning(f"No se pudo insertar en tblBufferMaxFechaFin: {e}. Continuando...")
+        #try:
+        #    self._execute_local(local_cur, sql_buff)
+        #except Exception as e:
+        #    logging.warning(f"No se pudo insertar en tblBufferMaxFechaFin: {e}. Continuando...")
 
         # Actualizar recepción de sucursales locales
         sql_rep_rec = (
@@ -717,10 +717,10 @@ class SyncEngine:
             f"INNER JOIN tblBufferMaxFechaFin B ON A.IdSocio = B.IdSocio AND A.IdSucursal = B.IdSucursalSocio "
             f"WHERE A.FechaVencimiento < B.MaxFechaFin AND B.MaxFechaFin >= NOW() AND B.IdSucursalConsulta = {self.id_sucursal} AND B.IdComputadora = {self.id_computadora}"
         )
-        try:
-            self._execute_local(local_cur, sql_rep_rec)
-        except Exception:
-            pass
+        #try:
+        #    self._execute_local(local_cur, sql_rep_rec)
+        #except Exception:
+        #    pass
 
         # Sincronizar fechas de vencimiento locales basadas en el buffer
         sql_upd_soc = (
@@ -729,12 +729,12 @@ class SyncEngine:
             f"SET A.FechaVencimiento = B.MaxFechaFin "
             f"WHERE A.FechaVencimiento < B.MaxFechaFin AND B.MaxFechaFin >= NOW() AND B.IdSucursalConsulta = {self.id_sucursal} AND B.IdComputadora = {self.id_computadora}"
         )
-        try:
-            self._execute_local(local_cur, sql_upd_soc)
-        except Exception:
-            pass
+        #try:
+        #    self._execute_local(local_cur, sql_upd_soc)
+        #except Exception:
+        #    pass
             
-        self.db.local_conn.commit()
+        #self.db.local_conn.commit()
 
         # Recibiendo socios de otras sucursales
         logging.info("Recibiendo socios de otras sucursales...")
