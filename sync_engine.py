@@ -121,6 +121,10 @@ class SyncEngine:
             # 14c. Respaldando Fotos
             self.push_fotos(local_cur, remote_cur)
 
+            # 14d. Respaldando Huellas
+            self.push_huellas(local_cur, remote_cur)
+
+
 
             # ----------------------------------------------------
             # MULTISUCURSAL (SOCIOS DE OTRAS SUCURSALES)
@@ -1405,5 +1409,79 @@ class SyncEngine:
             self.db.local_conn.commit()
         except Exception as e:
             logging.error(f"Error en push_fotos: {e}")
+
+    def push_huellas(self, local_cur, remote_cur):
+        import os
+        logging.info("Respaldando Huellas...")
+        try:
+            # 1. Remote clean up for empty/null fingerprint receipt flags
+            sql_clean = (
+                "UPDATE tblSociosHuellas A "
+                "INNER JOIN tblSociosSucursalesRecepcion B ON A.IdSocio = B.IdSocio AND A.IdSucursal = B.IdSucursal AND A.IdSucursalActualiza = B.IdSucursalActualiza "
+                f"SET Recepcion = 1 WHERE IdSucursalRecepcion = {self.id_sucursal} AND Recepcion = 0 AND TipoRecepcion = 2 "
+                f"AND A.IdSucursalActualiza <> {self.id_sucursal} AND Huella IS NULL"
+            )
+            try:
+                self._execute_remote(remote_cur, sql_clean)
+            except Exception as e:
+                logging.debug(f"Remoto clean up tblSociosHuellas omitido o error: {e}")
+
+            # 2. Query local modified fingerprints
+            sql = (
+                "SELECT A.*, Serie FROM tblSociosHuellas A "
+                "INNER JOIN tblSucursales B ON A.IdSucursal = B.IdSucursal "
+                "WHERE ModificadoHuella = 1 ORDER BY IdSocio"
+            )
+            self._execute_local(local_cur, sql)
+            rows = local_cur.fetchall()
+            
+            for row in tqdm(rows, desc="Push Huellas", disable=sys.stdout is None):
+                id_socio = self._get_val(row, 'IdSocio')
+                id_suc = self._get_val(row, 'IdSucursal')
+                serie = self._get_val(row, 'Serie')
+
+                # Update older fingerprints remote
+                self._execute_remote(remote_cur, f"UPDATE tblSociosHuellas SET EsUltimaHuella = 0 WHERE EsEmpleado = 0 AND IdSocio = {id_socio} AND IdSucursal = {id_suc}")
+
+                # Insert remote placeholder
+                sql_ins_placeholder = (
+                    "INSERT INTO tblSociosHuellas(IdSocio, IdSucursal, IdSucursalActualiza, FechaAct, EsUltimaHuella, EsEmpleado, Status) "
+                    f"VALUES({id_socio}, {id_suc}, {self.id_sucursal}, NOW(), 1, 0, 2)"
+                )
+                self._execute_remote(remote_cur, sql_ins_placeholder)
+
+                # Remote recipients sync
+                sql_rep_rec = (
+                    "REPLACE INTO tblSociosSucursalesRecepcion(IdSocio, IdSucursal, IdSucursalRecepcion, IdSucursalActualiza, Recepcion, FechaAct, TipoRecepcion) "
+                    f"SELECT {id_socio}, {id_suc}, IdSucursal, {self.id_sucursal}, 0, NOW(), 2 FROM tblSucursales WHERE Status = 0 AND IdSucursal <> {self.id_sucursal}"
+                )
+                self._execute_remote(remote_cur, sql_rep_rec)
+
+                # Local fingerprint path
+                file_name = f"{serie}{id_socio}.fpt"
+                local_path = os.path.join(self.ruta_servidor, "Huellas", file_name)
+
+                # Check and read file binary
+                if os.path.exists(local_path):
+                    with open(local_path, "rb") as f:
+                        huella_binary = f.read()
+
+                    # Update binary fingerprint remote
+                    sql_upd_huella = (
+                        "UPDATE tblSociosHuellas SET Huella = %s "
+                        f"WHERE EsEmpleado = 0 AND IdSocio = %s AND IdSucursal = %s AND EsUltimaHuella = 1"
+                    )
+                    self._execute_remote(remote_cur, sql_upd_huella, (huella_binary, id_socio, id_suc))
+                else:
+                    logging.warning(f"Huella no encontrada localmente: {local_path}")
+
+                # Clear local flags
+                self._execute_local(local_cur, f"UPDATE tblSociosHuellas SET ModificadoHuella = 0 WHERE IdSocio = {id_socio} AND IdSucursal = {id_suc}")
+                self._execute_local(local_cur, f"UPDATE tblSocios SET ModificadoHuella = 0 WHERE IdSocio = {id_socio} AND IdSucursal = {id_suc}")
+
+            self.db.local_conn.commit()
+        except Exception as e:
+            logging.error(f"Error en push_huellas: {e}")
+
 
 
