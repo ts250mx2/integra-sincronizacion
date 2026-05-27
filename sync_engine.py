@@ -1454,30 +1454,57 @@ class SyncEngine:
         try:
             self._execute_local(local_cur, "SELECT * FROM tblAsistencias WHERE Modificado >= 1")
             rows = local_cur.fetchall()
-            for row in tqdm(rows, desc="Push Asistencias", disable=sys.stdout is None):
-                id_asistencia = self._get_val(row, 'IdAsistencia')
-                id_usuario = self._get_val(row, 'IdUsuario')
-                fecha_asistencia = format_sql_date(self._get_val(row, 'FechaAsistencia'))
-                rechazo_huella = self._get_val(row, 'RechazoHuella')
-                es_salida = self._get_val(row, 'EsSalida')
-                id_lector = self._get_val(row, 'IdLector')
+            if not rows:
+                return
 
-                fields = "IdAsistencia, IdUsuario, FechaAsistencia, RechazoHuella, FechaAct, IdSucursal, EsSalida, IdLector"
-                vals = (
-                    f"{id_asistencia}, "
-                    f"{id_usuario}, "
-                    f"'{fecha_asistencia}', "
-                    f"{rechazo_huella}, "
-                    f"NOW(), "
-                    f"{self.id_sucursal}, "
-                    f"{valida_nulo(es_salida)}, "
-                    f"{valida_nulo(id_lector)}"
-                )
-                self._execute_remote(remote_cur, f"REPLACE INTO tblAsistencias({fields}) VALUES ({vals})")
-                self._execute_local(local_cur, f"UPDATE tblAsistencias SET Modificado = 0 WHERE IdAsistencia = {id_asistencia}")
+            total_records = len(rows)
+            logging.info(f"Total de asistencias modificadas encontradas: {total_records}")
+            
+            batch_size = 500
+            fields = "IdAsistencia, IdUsuario, FechaAsistencia, RechazoHuella, FechaAct, IdSucursal, EsSalida, IdLector"
+            
+            # Process in batches of 500 to optimize performance and prevent network roundtrip delays
+            for i in tqdm(range(0, total_records, batch_size), desc="Push Asistencias", disable=sys.stdout is None):
+                batch_rows = rows[i:i + batch_size]
+                batch_vals = []
+                ids_to_clear = []
+                
+                for row in batch_rows:
+                    id_asistencia = self._get_val(row, 'IdAsistencia')
+                    id_usuario = self._get_val(row, 'IdUsuario')
+                    fecha_asistencia = format_sql_date(self._get_val(row, 'FechaAsistencia'))
+                    rechazo_huella = self._get_val(row, 'RechazoHuella')
+                    es_salida = self._get_val(row, 'EsSalida')
+                    id_lector = self._get_val(row, 'IdLector')
+                    
+                    val_str = (
+                        f"({id_asistencia}, "
+                        f"{id_usuario}, "
+                        f"'{fecha_asistencia}', "
+                        f"{rechazo_huella}, "
+                        f"NOW(), "
+                        f"{self.id_sucursal}, "
+                        f"{valida_nulo(es_salida)}, "
+                        f"{valida_nulo(id_lector)})"
+                    )
+                    batch_vals.append(val_str)
+                    ids_to_clear.append(str(id_asistencia))
+                
+                if batch_vals:
+                    # 1. Bulk replace on remote MySQL
+                    sql_remote = f"REPLACE INTO tblAsistencias({fields}) VALUES " + ", ".join(batch_vals)
+                    self._execute_remote(remote_cur, sql_remote)
+                    
+                    # 2. Bulk update on local Access
+                    ids_joined = ", ".join(ids_to_clear)
+                    sql_local = f"UPDATE tblAsistencias SET Modificado = 0 WHERE IdAsistencia IN ({ids_joined})"
+                    self._execute_local(local_cur, sql_local)
+                    
             self.db.local_conn.commit()
+            logging.info("Asistencias respaldadas exitosamente en lote.")
         except Exception as e:
-            logging.error(f"Error en push_asistencias: {e}")
+            logging.error(f"Error en push_asistencias en lote: {e}")
+
 
     def push_fotos(self, local_cur, remote_cur):
         import os
