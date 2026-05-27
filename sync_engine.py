@@ -951,6 +951,99 @@ class SyncEngine:
         except Exception as e:
             logging.error(f"Error recibiendo fotos de otras sucursales: {e}")
 
+        # Recibiendo huellas de otras sucursales
+        logging.info("Recibiendo huellas de otras sucursales...")
+        try:
+            sql_huellas = (
+                f"SELECT A.*, Serie FROM tblSociosHuellas A "
+                f"INNER JOIN tblSucursales C ON A.IdSucursal = C.IdSucursal "
+                f"WHERE IdSucursalActualiza <> {self.id_sucursal} AND A.FechaAct >= '{fecha_act}' "
+                f"AND A.EsUltimaHuella = 1 AND Huella IS NOT NULL "
+                f"ORDER BY A.FechaAct"
+            )
+            self._execute_remote(remote_cur, sql_huellas)
+            rows_huellas = remote_cur.fetchall()
+            
+            import os
+            for row in tqdm(rows_huellas, desc="Huellas O.S.", disable=sys.stdout is None):
+                id_socio = self._get_val(row, 'IdSocio')
+                id_suc = self._get_val(row, 'IdSucursal')
+                es_empleado = self._get_val(row, 'EsEmpleado')
+                serie = self._get_val(row, 'Serie')
+                huella_data = self._get_val(row, 'Huella') # Binary blob
+                
+                if huella_data:
+                    # File path
+                    if es_empleado == 1:
+                        file_name = f"USU{id_socio}.fpt"
+                    else:
+                        file_name = f"{serie}{id_socio}.fpt"
+                        
+                    local_path = os.path.join(self.ruta_servidor, "Huellas", file_name)
+                    
+                    # Save file
+                    try:
+                        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                        with open(local_path, "wb") as f:
+                            f.write(huella_data)
+                    except Exception as e:
+                        logging.error(f"No se pudo escribir el archivo de huella local: {e}")
+                        
+                    # Update local database fields for Employee or Member
+                    if es_empleado == 1:
+                        sql_upd = "UPDATE tblUsuarios SET Huella = ? WHERE IdUsuario = ?"
+                        try:
+                            local_cur.execute(sql_upd, (huella_data, id_socio))
+                        except Exception as e:
+                            logging.debug(f"Actualización de huella en tblUsuarios falló: {e}")
+                    else:
+                        sql_upd = "UPDATE tblSocios SET Huella = ? WHERE IdSocio = ? AND IdSucursal = ?"
+                        try:
+                            local_cur.execute(sql_upd, (huella_data, id_socio, id_suc))
+                        except Exception as e:
+                            logging.debug(f"Actualización de huella en tblSocios falló: {e}")
+                            
+                    # Local delete and insert into tblSociosHuellas
+                    self._execute_local(local_cur, f"DELETE FROM tblSociosHuellas WHERE IdSocio = {id_socio} AND IdSucursal = {id_suc} AND EsEmpleado = {valida_nulo(es_empleado)}")
+                    
+                    sql_ins = (
+                        "INSERT INTO tblSociosHuellas(IdSocio, IdSucursal, EsEmpleado, ModificadoHuella, Prioridad, IdFamiliar, Status) "
+                        f"VALUES({id_socio}, {id_suc}, {valida_nulo(es_empleado)}, 0, 0, 0, 2)"
+                    )
+                    self._execute_local(local_cur, sql_ins)
+                    
+                    # Biometric ZK Interface update
+                    if self.id_sucursal != id_suc:
+                        self.actualizar_interface_zk(id_socio, id_suc, 0, 0)
+                        
+                    # Set Huella and Priority in tblSociosHuellas
+                    sql_upd_h = "UPDATE tblSociosHuellas SET Prioridad = 2, Huella = ? WHERE IdSocio = ? AND IdSucursal = ? AND EsEmpleado = ?"
+                    try:
+                        local_cur.execute(sql_upd_h, (huella_data, id_socio, id_suc, es_empleado))
+                    except Exception as e:
+                        logging.debug(f"Actualización de huella dactilar en tblSociosHuellas falló: {e}")
+                        
+                    # Recepcion computers ZK register
+                    self._execute_local(local_cur, f"DELETE FROM tblSociosComputadorasRecepcion WHERE IdSocio = {id_socio} AND IdSucursal = {id_suc}")
+                    sql_comp = (
+                        f"INSERT INTO tblSociosComputadorasRecepcion(IdSocio, IdSucursal, IdComputadora, FechaAct, Recepcion) "
+                        f"SELECT {id_socio}, {id_suc}, IdComputadora, NOW(), 0 FROM tblComputadoras WHERE EsHuella = 1"
+                    )
+                    self._execute_local(local_cur, sql_comp)
+                    
+                # Update remote receipt status
+                sql_upd_rem = (
+                    f"UPDATE tblSociosSucursalesRecepcion SET Recepcion = 1 "
+                    f"WHERE IdSocio = {id_socio} AND IdSucursal = {id_suc} AND IdSucursalRecepcion = {self.id_sucursal} AND TipoRecepcion = 2"
+                )
+                self._execute_remote(remote_cur, sql_upd_rem)
+                
+            self.db.local_conn.commit()
+            
+        except Exception as e:
+            logging.error(f"Error recibiendo huellas de otras sucursales: {e}")
+
+
 
 
     # --- ENVIOS FINALES / RESPALDOS ADICIONALES (LOCAL -> REMOTE) ---
